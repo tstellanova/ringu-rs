@@ -1,7 +1,8 @@
 [package]
-name = "rotunda"
+name = "ringu"
 version = "0.1.0"
 authors = ["Todd Stellanova <tstellanova@users.noreply.github.com>"]
+description= "no_std ring buffer"
 edition = "2018"
 
 
