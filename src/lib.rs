@@ -86,6 +86,11 @@ impl Ringu {
         self.write_idx.load(Ordering::SeqCst) == self.read_idx.load(Ordering::SeqCst)
     }
 
+    /// At the moment, how much vacant space remains in the buffer?
+    pub fn vacant(&self) -> usize {
+        BUF_LEN - self.available()
+    }
+
     /// Push one byte into the buffer
     /// Returns the number of bytes actually pushed (zero or one)
     pub fn push_one(&mut self, byte: u8) -> usize {
