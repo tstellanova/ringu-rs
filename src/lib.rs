@@ -31,6 +31,8 @@ pub struct Ringu {
     /// Optional user-overridden spin lock function
     spin_func: SpinFunc,
 
+    /// tracking bytes read
+    read_count: AtomicUsize,
 }
 
 impl Ringu {
@@ -40,18 +42,20 @@ impl Ringu {
             read_idx: AtomicUsize::new(0),
             write_idx: AtomicUsize::new(0),
             mut_lock: AtomicBool::new(false),
-            spin_func: Self::spinlock
+            spin_func: Self::spinlock,
+            read_count: AtomicUsize::new(0),
         }
     }
 
-    /// Provide a function that will be called when we're trying to lock this struct
+    /// Provide a custom spin function that will be called when we're trying to lock this struct
     pub fn new_with_spin(spin: SpinFunc) -> Self {
         Self {
             buf: [0; BUF_LEN],
             read_idx: AtomicUsize::new(0),
             write_idx: AtomicUsize::new(0),
             mut_lock: AtomicBool::new(false),
-            spin_func: spin
+            spin_func: spin,
+            read_count: AtomicUsize::new(0),
         }
     }
 
@@ -73,7 +77,12 @@ impl Ringu {
 
     /// How much data is available to be read?
     pub fn available(&self) -> usize {
-        self.write_idx.load(Ordering::SeqCst).wrapping_sub(self.read_idx.load(Ordering::SeqCst))
+        let write = self.write_idx.load(Ordering::SeqCst);
+        let read = self.read_idx.load(Ordering::SeqCst);
+        let avail = write.wrapping_sub(read);
+        let read_count = self.read_count.load(Ordering::Relaxed);
+        assert!(avail <= BUF_LEN, "avail: {} write: {} read: {} count: {}", avail, write, read, read_count);
+        avail
     }
 
     /// Is the buffer full?
@@ -91,11 +100,30 @@ impl Ringu {
         BUF_LEN - self.available()
     }
 
+    fn lock_if_not_full(&mut self) -> bool {
+        if !self.full() {
+            self.lock_me();
+            true
+        }
+        else {
+            false
+        }
+    }
+
+    fn lock_if_not_empty(&mut self) -> bool {
+        if !self.empty() {
+            self.lock_me();
+            true
+        }
+        else {
+            false
+        }
+    }
+
     /// Push one byte into the buffer
     /// Returns the number of bytes actually pushed (zero or one)
     pub fn push_one(&mut self, byte: u8) -> usize {
-        if !self.full() {
-            self.lock_me();
+        if self.lock_if_not_full() {
             //effectively this reserves space for the write
             let cur_write_idx = self.write_idx.fetch_add(1, Ordering::SeqCst);
             self.buf[cur_write_idx & (BUF_LEN - 1)] = byte;
@@ -109,10 +137,11 @@ impl Ringu {
 
     /// Read one byte from the buffer
     /// Returns the number of bytes actually read (zero or one)
+    /// and the byte read (if any)
     pub fn read_one(&mut self) -> (usize, u8) {
-        if !self.empty() {
-            self.lock_me();
+        if self.lock_if_not_empty() {
             //"reserve" the read
+            self.read_count.fetch_add(1, Ordering::Relaxed);
             let cur_read_idx = self.read_idx.fetch_add(1, Ordering::SeqCst);
             let byte = self.buf[cur_read_idx & (BUF_LEN - 1)];
             self.unlock_me();
