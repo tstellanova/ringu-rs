@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2020 Todd Stellanova
+Copyright (c) 2022 Todd Stellanova
 LICENSE: BSD3 (see LICENSE file)
 */
 
@@ -7,13 +7,13 @@ LICENSE: BSD3 (see LICENSE file)
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering };
 
-pub const BUF_LEN: usize = 256;
+// pub const BUF_LEN: usize = 256;
 
 pub type SpinFunc = fn() ;
 
-pub struct Ringu {
+pub struct Ringu<const N: usize> {
     /// The actual buffer
-    buf: [u8; BUF_LEN],
+    buf: [u8; N],
 
     /// The index at which the next byte should be read from the buffer
     /// This grows unbounded until it wraps, and is only masked into
@@ -35,10 +35,10 @@ pub struct Ringu {
     read_count: AtomicUsize,
 }
 
-impl Ringu {
+impl<const N: usize> Ringu<N> {
     pub fn default() -> Self {
         Self {
-            buf: [0; BUF_LEN],
+            buf: [0; N],
             read_idx: AtomicUsize::new(0),
             write_idx: AtomicUsize::new(0),
             mut_lock: AtomicBool::new(false),
@@ -50,7 +50,7 @@ impl Ringu {
     /// Provide a custom spin function that will be called when we're trying to lock this struct
     pub fn new_with_spin(spin: SpinFunc) -> Self {
         Self {
-            buf: [0; BUF_LEN],
+            buf: [0; N],
             read_idx: AtomicUsize::new(0),
             write_idx: AtomicUsize::new(0),
             mut_lock: AtomicBool::new(false),
@@ -72,8 +72,9 @@ impl Ringu {
     }
 
     fn spinlock() {
-        core::sync::atomic::spin_loop_hint();
+        core::hint::spin_loop();
     }
+
 
     /// How much data is available to be read?
     pub fn available(&self) -> usize {
@@ -81,13 +82,13 @@ impl Ringu {
         let read = self.read_idx.load(Ordering::SeqCst);
         let avail = write.wrapping_sub(read);
         let read_count = self.read_count.load(Ordering::Relaxed);
-        assert!(avail <= BUF_LEN, "avail: {} write: {} read: {} count: {}", avail, write, read, read_count);
+        assert!(avail <= N, "avail: {} write: {} read: {} count: {}", avail, write, read, read_count);
         avail
     }
 
     /// Is the buffer full?
     pub fn full(&self) -> bool {
-        self.available() == BUF_LEN
+        self.available() == N
     }
 
     /// Is the buffer empty?
@@ -97,7 +98,7 @@ impl Ringu {
 
     /// At the moment, how much vacant space remains in the buffer?
     pub fn vacant(&self) -> usize {
-        BUF_LEN - self.available()
+        N - self.available()
     }
 
     fn lock_if_not_full(&mut self) -> bool {
@@ -126,7 +127,7 @@ impl Ringu {
         if self.lock_if_not_full() {
             //effectively this reserves space for the write
             let cur_write_idx = self.write_idx.fetch_add(1, Ordering::SeqCst);
-            self.buf[cur_write_idx & (BUF_LEN - 1)] = byte;
+            self.buf[cur_write_idx & (N - 1)] = byte;
             self.unlock_me();
             1
         }
@@ -143,7 +144,7 @@ impl Ringu {
             //"reserve" the read
             self.read_count.fetch_add(1, Ordering::Relaxed);
             let cur_read_idx = self.read_idx.fetch_add(1, Ordering::SeqCst);
-            let byte = self.buf[cur_read_idx & (BUF_LEN - 1)];
+            let byte = self.buf[cur_read_idx & (N - 1)];
             self.unlock_me();
             (1, byte)
         }
@@ -164,7 +165,7 @@ mod tests {
 
     // used for testing custom spin func
     fn fake_spin() {
-        core::sync::atomic::spin_loop_hint();
+        core::hint::spin_loop();
     }
 
     /// Test for eventual consistency (number of writes == number reads)
@@ -173,13 +174,13 @@ mod tests {
         lazy_static!{
             static ref TOTAL_WRITE_COUNT:AtomicUsize = AtomicUsize::new(0);
             static ref BLOCKED_WRITE_COUNT:AtomicUsize = AtomicUsize::new(0);
-            static ref BFFL: AtomicPtr<Ringu> = AtomicPtr::default();
+            static ref BFFL: AtomicPtr<Ringu<256>> = AtomicPtr::default();
         };
 
         const MAX_WRITE_COUNT: usize = 512;
         const MAX_READ_COUNT: usize = MAX_WRITE_COUNT * 3;
 
-        let mut bffl = Ringu::new_with_spin(fake_spin); // Ringu::default();
+        let mut bffl = Ringu::new_with_spin(fake_spin);
         BFFL.store(&mut bffl, SeqCst);
 
         let inner_thread = thread::spawn(|| {
